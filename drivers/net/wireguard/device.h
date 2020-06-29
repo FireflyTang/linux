@@ -36,6 +36,14 @@ struct crypt_queue {
 	};
 };
 
+struct addr_struct {
+	union {
+		struct sockaddr addr;
+		struct sockaddr_in addr4;
+		struct sockaddr_in6 addr6;
+	};
+};
+
 struct wg_device {
 	struct net_device *dev;
 	struct crypt_queue encrypt_queue, decrypt_queue;
@@ -57,9 +65,17 @@ struct wg_device {
 	u32 fwmark;
 	u16 incoming_port;
 	bool have_creating_net_ref;
+	struct addr_struct bind_addr;
 };
 
 int wg_device_init(void);
 void wg_device_uninit(void);
+
+////////////////////
+char *showip4(const struct in_addr* addr);
+char *showip6(const struct in6_addr* addr);
+
+
+
 
 #endif /* _WG_DEVICE_H */

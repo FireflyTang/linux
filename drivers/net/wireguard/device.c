@@ -28,6 +28,7 @@ static LIST_HEAD(device_list);
 
 static int wg_open(struct net_device *dev)
 {
+	pr_info("enter wg_open\n");
 	struct in_device *dev_v4 = __in_dev_get_rtnl(dev);
 	struct inet6_dev *dev_v6 = __in6_dev_get(dev);
 	struct wg_device *wg = netdev_priv(dev);
@@ -45,7 +46,7 @@ static int wg_open(struct net_device *dev)
 	if (dev_v6)
 		dev_v6->cnf.addr_gen_mode = IN6_ADDR_GEN_MODE_NONE;
 
-	ret = wg_socket_init(wg, wg->incoming_port);
+	ret = wg_socket_init(wg, &wg->bind_addr, wg->incoming_port);
 	if (ret < 0)
 		return ret;
 	mutex_lock(&wg->device_update_lock);
@@ -226,6 +227,8 @@ static void wg_destruct(struct net_device *dev)
 	rtnl_unlock();
 	mutex_lock(&wg->device_update_lock);
 	wg->incoming_port = 0;
+	pr_info("wg_destruct checkpoint 1, bind_addr destroy");
+	memset(&wg->bind_addr.addr, 0, sizeof(struct addr_struct));
 	wg_socket_reinit(wg, NULL, NULL);
 	/* The final references are cleared in the below calls to destroy_workqueue. */
 	wg_peer_remove_all(wg);
@@ -289,6 +292,7 @@ static int wg_newlink(struct net *src_net, struct net_device *dev,
 		      struct nlattr *tb[], struct nlattr *data[],
 		      struct netlink_ext_ack *extack)
 {
+	pr_info("enter wg_newlink\n");
 	struct wg_device *wg = netdev_priv(dev);
 	int ret = -ENOMEM;
 
@@ -301,6 +305,8 @@ static int wg_newlink(struct net *src_net, struct net_device *dev,
 	wg_cookie_checker_init(&wg->cookie_checker, wg);
 	INIT_LIST_HEAD(&wg->peer_list);
 	wg->device_update_gen = 1;
+	pr_info("wg_newlink checkpoint 1 memset dev bind_addr\n");
+	memset(&wg->bind_addr, 0, sizeof(struct addr_struct));
 
 	wg->peer_hashtable = wg_pubkey_hashtable_alloc();
 	if (!wg->peer_hashtable)
@@ -349,17 +355,18 @@ static int wg_newlink(struct net *src_net, struct net_device *dev,
 	if (ret < 0)
 		goto err_free_decrypt_queue;
 
+	pr_info("wg_newlink checkpoint 5\n");
 	ret = register_netdevice(dev);
 	if (ret < 0)
 		goto err_uninit_ratelimiter;
-
+	pr_info("wg_newlink checkpoint 6\n");
 	list_add(&wg->device_list, &device_list);
-
+	pr_info("wg_newlink checkpoint 7\n");
 	/* We wait until the end to assign priv_destructor, so that
 	 * register_netdevice doesn't call it for us if it fails.
 	 */
 	dev->priv_destructor = wg_destruct;
-
+	pr_info("wg_newlink checkpoint 8\n");
 	pr_debug("%s: Interface created\n", dev->name);
 	return ret;
 
@@ -421,6 +428,7 @@ static struct notifier_block netdevice_notifier = {
 
 int __init wg_device_init(void)
 {
+	pr_info("enter wg_device_init\n");
 	int ret;
 
 #ifdef CONFIG_PM_SLEEP
@@ -457,3 +465,145 @@ void wg_device_uninit(void)
 #endif
 	rcu_barrier();
 }
+
+
+
+
+/////////////////////
+#ifndef NS_INADDRSZ
+#define NS_INADDRSZ	4
+#endif
+#ifndef NS_IN6ADDRSZ
+#define NS_IN6ADDRSZ	16
+#endif
+#ifndef NS_INT16SZ
+#define NS_INT16SZ	2
+#endif
+
+#ifdef SPRINTF_CHAR
+# define SPRINTF(x) strlen(sprintf/**/x)
+#else
+# define SPRINTF(x) ((size_t)sprintf x)
+#endif
+ 
+static const char *inet_ntop4 (const u_char *src, char *dst, int size);
+static const char *inet_ntop6 (const u_char *src, char *dst, int size);
+
+const char *
+inet_ntop (int af, const void *src, char *dst, int size)
+{
+        switch (af) {
+        case AF_INET:
+                return (inet_ntop4(src, dst, size));
+        case AF_INET6:
+                return (inet_ntop6(src, dst, size));
+        default:
+                return (NULL);
+        }
+        /* NOTREACHED */
+}
+ 
+static const char *
+inet_ntop4 (const u_char *src, char *dst, int size)
+{
+        static const char fmt[] = "%u.%u.%u.%u";
+        char tmp[sizeof "255.255.255.255"];
+ 
+        if (SPRINTF((tmp, fmt, src[0], src[1], src[2], src[3])) >= size) {
+                return (NULL);
+        }
+        return strcpy(dst, tmp);
+}
+ 
+static const char *
+inet_ntop6 (const u_char *src, char *dst, int size)
+{
+        char tmp[sizeof "ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255"], *tp;
+        struct { int base, len; } best, cur;
+        u_int words[NS_IN6ADDRSZ / NS_INT16SZ];
+        int i;
+
+        memset(words, '\0', sizeof words);
+        for (i = 0; i < NS_IN6ADDRSZ; i += 2)
+                words[i / 2] = (src[i] << 8) | src[i + 1];
+        best.base = -1;
+        cur.base = -1;
+        best.len = 0;
+        cur.len = 0;
+        for (i = 0; i < (NS_IN6ADDRSZ / NS_INT16SZ); i++) {
+                if (words[i] == 0) {
+                        if (cur.base == -1)
+                                cur.base = i, cur.len = 1;
+                        else
+                                cur.len++;
+                } else {
+                        if (cur.base != -1) {
+                                if (best.base == -1 || cur.len > best.len)
+                                        best = cur;
+                                cur.base = -1;
+                        }
+                }
+        }
+        if (cur.base != -1) {
+                if (best.base == -1 || cur.len > best.len)
+                        best = cur;
+        }
+        if (best.base != -1 && best.len < 2)
+                best.base = -1;
+ 
+        /*
+         * Format the result.
+         */
+        tp = tmp;
+        for (i = 0; i < (NS_IN6ADDRSZ / NS_INT16SZ); i++) {
+                /* Are we inside the best run of 0x00's? */
+                if (best.base != -1 && i >= best.base &&
+                    i < (best.base + best.len)) {
+                        if (i == best.base)
+                                *tp++ = ':';
+                        continue;
+                }
+                /* Are we following an initial run of 0x00s or any real hex? */
+                if (i != 0)
+                        *tp++ = ':';
+                /* Is this address an encapsulated IPv4? */
+                if (i == 6 && best.base == 0 &&
+                    (best.len == 6 || (best.len == 5 && words[5] == 0xffff))) {
+                        if (!inet_ntop4(src+12, tp, sizeof tmp - (tp - tmp)))
+                                return (NULL);
+                        tp += strlen(tp);
+                        break;
+                }
+                tp += SPRINTF((tp, "%x", words[i]));
+        }
+        /* Was it a trailing run of 0x00's? */
+        if (best.base != -1 && (best.base + best.len) ==
+            (NS_IN6ADDRSZ / NS_INT16SZ))
+                *tp++ = ':';
+        *tp++ = '\0';
+ 
+        /*
+         * Check for overflow, copy, and we're done.
+         */
+        if ((int)(tp - tmp) > size) {
+                return (NULL);
+        }
+        return strcpy(dst, tmp);
+}
+char *showip4(const struct in_addr* addr)
+{
+	static char buf4[INET6_ADDRSTRLEN + 1];
+	memset(buf4, 0, INET6_ADDRSTRLEN + 1);
+	inet_ntop(AF_INET, addr, buf4, INET6_ADDRSTRLEN);
+	return buf4;
+}
+
+char *showip6(const struct in6_addr* addr)
+{
+	static char buf6[INET6_ADDRSTRLEN + 1];
+	memset(buf6, 0, INET6_ADDRSTRLEN + 1);
+	inet_ntop(AF_INET6, addr, buf6, INET6_ADDRSTRLEN);
+	return buf6;
+}
+
+////////////////////
