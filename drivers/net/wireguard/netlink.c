@@ -27,7 +27,8 @@ static const struct nla_policy device_policy[WGDEVICE_A_MAX + 1] = {
 	[WGDEVICE_A_FLAGS]		= { .type = NLA_U32 },
 	[WGDEVICE_A_LISTEN_PORT]	= { .type = NLA_U16 },
 	[WGDEVICE_A_FWMARK]		= { .type = NLA_U32 },
-	[WGDEVICE_A_PEERS]		= { .type = NLA_NESTED }
+	[WGDEVICE_A_PEERS]		= { .type = NLA_NESTED },
+	[WGDEVICE_A_BIND_ADDR]          = { .type = NLA_BINARY, .len = sizeof(struct sockaddr_in6) }
 };
 
 static const struct nla_policy peer_policy[WGPEER_A_MAX + 1] = {
@@ -236,6 +237,18 @@ static int wg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 		    nla_put_string(skb, WGDEVICE_A_IFNAME, wg->dev->name))
 			goto out;
 
+		if (wg->bind_addr.addr.sa_family == AF_INET) {
+			if (nla_put(skb, WGDEVICE_A_BIND_ADDR,
+				    sizeof(struct sockaddr_in),
+				    &wg->bind_addr.addr4))
+				goto out;
+		} else if (wg->bind_addr.addr.sa_family == AF_INET6) {
+			if (nla_put(skb, WGDEVICE_A_BIND_ADDR,
+				    sizeof(struct sockaddr_in6),
+				    &wg->bind_addr.addr6))
+				goto out;
+		}
+
 		down_read(&wg->static_identity.lock);
 		if (wg->static_identity.has_identity) {
 			if (nla_put(skb, WGDEVICE_A_PRIVATE_KEY,
@@ -311,19 +324,12 @@ static int wg_get_device_done(struct netlink_callback *cb)
 	return 0;
 }
 
-static int set_port(struct wg_device *wg, u16 port)
+static int set_socket(struct wg_device *wg, struct addr_struct *bind_addr, u16 port)
 {
 	struct wg_peer *peer;
-
-	if (wg->incoming_port == port)
-		return 0;
 	list_for_each_entry(peer, &wg->peer_list, peer_list)
 		wg_socket_clear_peer_endpoint_src(peer);
-	if (!netif_running(wg->dev)) {
-		wg->incoming_port = port;
-		return 0;
-	}
-	return wg_socket_init(wg, port);
+	return wg_socket_init(wg, bind_addr, port);
 }
 
 static int set_allowedip(struct wg_peer *peer, struct nlattr **attrs)
@@ -491,11 +497,25 @@ out:
 	return ret;
 }
 
+static bool bind_addr_eq(const struct sockaddr *a, const struct sockaddr *b)
+{
+	return (a->sa_family == AF_INET && b->sa_family == AF_INET &&
+		((struct sockaddr_in *)a)->sin_addr.s_addr ==
+		((struct sockaddr_in *)b)->sin_addr.s_addr) ||
+		(a->sa_family == AF_INET6 && b->sa_family == AF_INET6 &&
+		ipv6_addr_equal(&((struct sockaddr_in6 *)a)->sin6_addr,
+				&((struct sockaddr_in6 *)b)->sin6_addr)) ||
+		(a->sa_family == AF_UNSPEC && b->sa_family == AF_UNSPEC);
+}
+
 static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 {
 	struct wg_device *wg = lookup_interface(info->attrs, skb);
 	u32 flags = 0;
 	int ret;
+	bool if_set_socket = false;
+	u16 port_new;
+	struct addr_struct bind_addr_new;
 
 	if (IS_ERR(wg)) {
 		ret = PTR_ERR(wg);
@@ -505,13 +525,18 @@ static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 	rtnl_lock();
 	mutex_lock(&wg->device_update_lock);
 
+	port_new = wg->incoming_port;
+	bind_addr_new = wg->bind_addr;
+
 	if (info->attrs[WGDEVICE_A_FLAGS])
 		flags = nla_get_u32(info->attrs[WGDEVICE_A_FLAGS]);
 	ret = -EOPNOTSUPP;
 	if (flags & ~__WGDEVICE_F_ALL)
 		goto out;
 
-	if (info->attrs[WGDEVICE_A_LISTEN_PORT] || info->attrs[WGDEVICE_A_FWMARK]) {
+	if (info->attrs[WGDEVICE_A_LISTEN_PORT] ||
+	    info->attrs[WGDEVICE_A_BIND_ADDR] ||
+	    info->attrs[WGDEVICE_A_FWMARK]) {
 		struct net *net;
 		rcu_read_lock();
 		net = rcu_dereference(wg->creating_net);
@@ -532,8 +557,42 @@ static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	if (info->attrs[WGDEVICE_A_LISTEN_PORT]) {
-		ret = set_port(wg,
-			nla_get_u16(info->attrs[WGDEVICE_A_LISTEN_PORT]));
+		u16 port = nla_get_u16(info->attrs[WGDEVICE_A_LISTEN_PORT]);
+
+		if (wg->incoming_port != port) {
+			if (!netif_running(wg->dev)) {
+				wg->incoming_port = port;
+			} else {
+				if_set_socket = true;
+				port_new = port;
+			}
+		}
+	}
+
+	if (info->attrs[WGDEVICE_A_BIND_ADDR]) {
+		struct sockaddr *addr = nla_data(info->attrs[WGDEVICE_A_BIND_ADDR]);
+
+		if (!bind_addr_eq(&wg->bind_addr.addr, addr)) {
+			size_t len = nla_len(info->attrs[WGDEVICE_A_BIND_ADDR]);
+			if ((addr->sa_family == AF_INET &&
+			     len == sizeof(struct sockaddr_in)) ||
+			    ((addr->sa_family == AF_INET6 ||
+			      addr->sa_family == AF_UNSPEC) &&
+			     len == sizeof(struct sockaddr_in6))) {
+				if (!netif_running(wg->dev)) {
+					memcpy(&wg->bind_addr.addr, addr, len);
+				} else {
+					if_set_socket = true;
+					memcpy(&bind_addr_new, addr, len);
+				}
+			} else {
+				goto out;
+			}
+		}
+	}
+
+	if (if_set_socket) {
+		ret = set_socket(wg, &bind_addr_new, port_new);
 		if (ret)
 			goto out;
 	}

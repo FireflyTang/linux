@@ -345,7 +345,7 @@ static void set_sock_opts(struct socket *sock)
 	sk_set_memalloc(sock->sk);
 }
 
-int wg_socket_init(struct wg_device *wg, u16 port)
+int wg_socket_init(struct wg_device *wg, struct addr_struct *bind_addr, u16 port)
 {
 	struct net *net;
 	int ret;
@@ -366,6 +366,7 @@ int wg_socket_init(struct wg_device *wg, u16 port)
 	struct udp_port_cfg port6 = {
 		.family = AF_INET6,
 		.local_ip6 = IN6ADDR_ANY_INIT,
+		.local_udp_port = htons(port),
 		.use_udp6_tx_checksums = true,
 		.use_udp6_rx_checksums = true,
 		.ipv6_v6only = true
@@ -383,20 +384,30 @@ int wg_socket_init(struct wg_device *wg, u16 port)
 retry:
 #endif
 
-	ret = udp_sock_create(net, &port4, &new4);
-	if (ret < 0) {
-		pr_err("%s: Could not create IPv4 socket\n", wg->dev->name);
-		goto out;
+	if (bind_addr->addr.sa_family == AF_INET ||
+	    bind_addr->addr.sa_family == AF_UNSPEC) {
+		if (bind_addr->addr.sa_family == AF_INET)
+			port4.local_ip = bind_addr->addr4.sin_addr;
+		ret = udp_sock_create(net, &port4, &new4);
+		if (ret < 0) {
+			pr_err("%s: Could not create IPv4 socket\n",
+			       wg->dev->name);
+			goto out;
+		}
+		set_sock_opts(new4);
+		setup_udp_tunnel_sock(net, new4, &cfg);
 	}
-	set_sock_opts(new4);
-	setup_udp_tunnel_sock(net, new4, &cfg);
 
 #if IS_ENABLED(CONFIG_IPV6)
-	if (ipv6_mod_enabled()) {
-		port6.local_udp_port = inet_sk(new4->sk)->inet_sport;
+	if (ipv6_mod_enabled() &&
+	    (bind_addr->addr.sa_family == AF_INET6 ||
+	     bind_addr->addr.sa_family == AF_UNSPEC)) {
+		if (bind_addr->addr.sa_family == AF_INET6)
+			port6.local_ip6 = bind_addr->addr6.sin6_addr;
 		ret = udp_sock_create(net, &port6, &new6);
 		if (ret < 0) {
-			udp_tunnel_sock_release(new4);
+			if (new4)
+				udp_tunnel_sock_release(new4);
 			if (ret == -EADDRINUSE && !port && retries++ < 100)
 				goto retry;
 			pr_err("%s: Could not create IPv6 socket\n",
@@ -408,7 +419,7 @@ retry:
 	}
 #endif
 
-	wg_socket_reinit(wg, new4->sk, new6 ? new6->sk : NULL);
+	wg_socket_reinit(wg, new4 ? new4->sk : NULL, new6 ? new6->sk : NULL);
 	ret = 0;
 out:
 	put_net(net);
@@ -427,8 +438,16 @@ void wg_socket_reinit(struct wg_device *wg, struct sock *new4,
 				lockdep_is_held(&wg->socket_update_lock));
 	rcu_assign_pointer(wg->sock4, new4);
 	rcu_assign_pointer(wg->sock6, new6);
-	if (new4)
+	if (new4) {
 		wg->incoming_port = ntohs(inet_sk(new4)->inet_sport);
+		wg->bind_addr.addr4.sin_addr.s_addr = inet_sk(new4)->inet_saddr;
+		wg->bind_addr.addr.sa_family = new6 ? AF_UNSPEC : AF_INET;
+	} else if (new6) {
+		wg->incoming_port = ntohs(inet_sk(new6)->inet_sport);
+		memcpy(&wg->bind_addr.addr6.sin6_addr,
+		       &inet6_sk(new6)->saddr, sizeof(struct in6_addr));
+		wg->bind_addr.addr.sa_family = AF_INET6;
+	}
 	mutex_unlock(&wg->socket_update_lock);
 	synchronize_rcu();
 	sock_free(old4);

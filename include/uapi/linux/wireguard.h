@@ -52,6 +52,7 @@
  *        0: NLA_NESTED
  *            ...
  *        ...
+ *     WGDEVICE_A_BIND_ADDR: NLA_BINARY(struct sockaddr_in6)
  *
  * It is possible that all of the allowed IPs of a single peer will not
  * fit within a single netlink message. In that case, the same peer will
@@ -114,6 +115,7 @@
  *        0: NLA_NESTED
  *            ...
  *        ...
+ *     WGDEVICE_A_BIND_ADDR: NLA_BINARY(struct sockaddr_in6)
  *
  * It is possible that the amount of configuration data exceeds that of
  * the maximum message length accepted by the kernel. In that case, several
@@ -157,6 +159,7 @@ enum wgdevice_attribute {
 	WGDEVICE_A_LISTEN_PORT,
 	WGDEVICE_A_FWMARK,
 	WGDEVICE_A_PEERS,
+	WGDEVICE_A_BIND_ADDR,
 	__WGDEVICE_A_LAST
 };
 #define WGDEVICE_A_MAX (__WGDEVICE_A_LAST - 1)
