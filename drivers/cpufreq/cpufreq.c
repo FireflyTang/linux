@@ -1733,6 +1733,26 @@ unsigned int cpufreq_quick_get_max(unsigned int cpu)
 }
 EXPORT_SYMBOL(cpufreq_quick_get_max);
 
+/**
+ * cpufreq_get_hw_max_freq - get the max hardware frequency of the CPU
+ * @cpu: CPU number
+ *
+ * The default return value is the max_freq field of cpuinfo.
+ */
+__weak unsigned int cpufreq_get_hw_max_freq(unsigned int cpu)
+{
+	struct cpufreq_policy *policy = cpufreq_cpu_get(cpu);
+	unsigned int ret_freq = 0;
+
+	if (policy) {
+		ret_freq = policy->cpuinfo.max_freq;
+		cpufreq_cpu_put(policy);
+	}
+
+	return ret_freq;
+}
+EXPORT_SYMBOL(cpufreq_get_hw_max_freq);
+
 static unsigned int __cpufreq_get(struct cpufreq_policy *policy)
 {
 	if (unlikely(policy_is_inactive(policy)))
@@ -2512,33 +2532,29 @@ EXPORT_SYMBOL_GPL(cpufreq_update_limits);
 /*********************************************************************
  *               BOOST						     *
  *********************************************************************/
-static int cpufreq_boost_set_sw(int state)
+static int cpufreq_boost_set_sw(struct cpufreq_policy *policy, int state)
 {
-	struct cpufreq_policy *policy;
-	int ret = -EINVAL;
+	int ret;
 
-	for_each_active_policy(policy) {
-		if (!policy->freq_table)
-			continue;
+	if (!policy->freq_table)
+		return -ENXIO;
 
-		ret = cpufreq_frequency_table_cpuinfo(policy,
-						      policy->freq_table);
-		if (ret) {
-			pr_err("%s: Policy frequency update failed\n",
-			       __func__);
-			break;
-		}
-
-		ret = freq_qos_update_request(policy->max_freq_req, policy->max);
-		if (ret < 0)
-			break;
+	ret = cpufreq_frequency_table_cpuinfo(policy, policy->freq_table);
+	if (ret) {
+		pr_err("%s: Policy frequency update failed\n", __func__);
+		return ret;
 	}
 
-	return ret;
+	ret = freq_qos_update_request(policy->max_freq_req, policy->max);
+	if (ret < 0)
+		return ret;
+
+	return 0;
 }
 
 int cpufreq_boost_trigger_state(int state)
 {
+	struct cpufreq_policy *policy;
 	unsigned long flags;
 	int ret = 0;
 
@@ -2549,15 +2565,25 @@ int cpufreq_boost_trigger_state(int state)
 	cpufreq_driver->boost_enabled = state;
 	write_unlock_irqrestore(&cpufreq_driver_lock, flags);
 
-	ret = cpufreq_driver->set_boost(state);
-	if (ret) {
-		write_lock_irqsave(&cpufreq_driver_lock, flags);
-		cpufreq_driver->boost_enabled = !state;
-		write_unlock_irqrestore(&cpufreq_driver_lock, flags);
-
-		pr_err("%s: Cannot %s BOOST\n",
-		       __func__, state ? "enable" : "disable");
+	get_online_cpus();
+	for_each_active_policy(policy) {
+		ret = cpufreq_driver->set_boost(policy, state);
+		if (ret)
+			goto err_reset_state;
 	}
+	put_online_cpus();
+
+	return 0;
+
+err_reset_state:
+	put_online_cpus();
+
+	write_lock_irqsave(&cpufreq_driver_lock, flags);
+	cpufreq_driver->boost_enabled = !state;
+	write_unlock_irqrestore(&cpufreq_driver_lock, flags);
+
+	pr_err("%s: Cannot %s BOOST\n",
+	       __func__, state ? "enable" : "disable");
 
 	return ret;
 }

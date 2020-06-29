@@ -35,65 +35,86 @@ static int hsr_newlink(struct net *src_net, struct net_device *dev,
 	unsigned char multicast_spec, hsr_version;
 
 	if (!data) {
-		netdev_info(dev, "HSR: No slave devices specified\n");
+		NL_SET_ERR_MSG_MOD(extack, "No slave devices specified");
 		return -EINVAL;
 	}
 	if (!data[IFLA_HSR_SLAVE1]) {
-		netdev_info(dev, "HSR: Slave1 device not specified\n");
+		NL_SET_ERR_MSG_MOD(extack, "Slave1 device not specified");
 		return -EINVAL;
 	}
 	link[0] = __dev_get_by_index(src_net,
 				     nla_get_u32(data[IFLA_HSR_SLAVE1]));
+	if (!link[0]) {
+		NL_SET_ERR_MSG_MOD(extack, "Slave1 does not exist");
+		return -EINVAL;
+	}
 	if (!data[IFLA_HSR_SLAVE2]) {
-		netdev_info(dev, "HSR: Slave2 device not specified\n");
+		NL_SET_ERR_MSG_MOD(extack, "Slave2 device not specified");
 		return -EINVAL;
 	}
 	link[1] = __dev_get_by_index(src_net,
 				     nla_get_u32(data[IFLA_HSR_SLAVE2]));
-
-	if (!link[0] || !link[1])
-		return -ENODEV;
-	if (link[0] == link[1])
+	if (!link[1]) {
+		NL_SET_ERR_MSG_MOD(extack, "Slave2 does not exist");
 		return -EINVAL;
+	}
+
+	if (link[0] == link[1]) {
+		NL_SET_ERR_MSG_MOD(extack, "Slave1 and Slave2 are same");
+		return -EINVAL;
+	}
 
 	if (!data[IFLA_HSR_MULTICAST_SPEC])
 		multicast_spec = 0;
 	else
 		multicast_spec = nla_get_u8(data[IFLA_HSR_MULTICAST_SPEC]);
 
-	if (!data[IFLA_HSR_VERSION])
+	if (!data[IFLA_HSR_VERSION]) {
 		hsr_version = 0;
-	else
+	} else {
 		hsr_version = nla_get_u8(data[IFLA_HSR_VERSION]);
+		if (hsr_version > 1) {
+			NL_SET_ERR_MSG_MOD(extack,
+					   "Only versions 0..1 are supported");
+			return -EINVAL;
+		}
+	}
 
-	return hsr_dev_finalize(dev, link, multicast_spec, hsr_version);
+	return hsr_dev_finalize(dev, link, multicast_spec, hsr_version, extack);
+}
+
+static void hsr_dellink(struct net_device *dev, struct list_head *head)
+{
+	struct hsr_priv *hsr = netdev_priv(dev);
+
+	del_timer_sync(&hsr->prune_timer);
+	del_timer_sync(&hsr->announce_timer);
+
+	hsr_debugfs_term(hsr);
+	hsr_del_ports(hsr);
+
+	hsr_del_self_node(hsr);
+	hsr_del_nodes(&hsr->node_db);
+
+	unregister_netdevice_queue(dev, head);
 }
 
 static int hsr_fill_info(struct sk_buff *skb, const struct net_device *dev)
 {
-	struct hsr_priv *hsr;
+	struct hsr_priv *hsr = netdev_priv(dev);
 	struct hsr_port *port;
-	int res;
 
-	hsr = netdev_priv(dev);
-
-	res = 0;
-
-	rcu_read_lock();
 	port = hsr_port_get_hsr(hsr, HSR_PT_SLAVE_A);
-	if (port)
-		res = nla_put_u32(skb, IFLA_HSR_SLAVE1, port->dev->ifindex);
-	rcu_read_unlock();
-	if (res)
-		goto nla_put_failure;
+	if (port) {
+		if (nla_put_u32(skb, IFLA_HSR_SLAVE1, port->dev->ifindex))
+			goto nla_put_failure;
+	}
 
-	rcu_read_lock();
 	port = hsr_port_get_hsr(hsr, HSR_PT_SLAVE_B);
-	if (port)
-		res = nla_put_u32(skb, IFLA_HSR_SLAVE2, port->dev->ifindex);
-	rcu_read_unlock();
-	if (res)
-		goto nla_put_failure;
+	if (port) {
+		if (nla_put_u32(skb, IFLA_HSR_SLAVE2, port->dev->ifindex))
+			goto nla_put_failure;
+	}
 
 	if (nla_put(skb, IFLA_HSR_SUPERVISION_ADDR, ETH_ALEN,
 		    hsr->sup_multicast_addr) ||
@@ -113,6 +134,7 @@ static struct rtnl_link_ops hsr_link_ops __read_mostly = {
 	.priv_size	= sizeof(struct hsr_priv),
 	.setup		= hsr_dev_setup,
 	.newlink	= hsr_newlink,
+	.dellink	= hsr_dellink,
 	.fill_info	= hsr_fill_info,
 };
 

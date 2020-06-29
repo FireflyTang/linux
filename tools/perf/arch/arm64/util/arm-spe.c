@@ -11,17 +11,17 @@
 #include <linux/zalloc.h>
 #include <time.h>
 
-#include "../../util/cpumap.h"
-#include "../../util/event.h"
-#include "../../util/evsel.h"
-#include "../../util/evlist.h"
-#include "../../util/session.h"
+#include "../../../util/cpumap.h"
+#include "../../../util/event.h"
+#include "../../../util/evsel.h"
+#include "../../../util/evlist.h"
+#include "../../../util/session.h"
 #include <internal/lib.h> // page_size
-#include "../../util/pmu.h"
-#include "../../util/debug.h"
-#include "../../util/auxtrace.h"
-#include "../../util/record.h"
-#include "../../util/arm-spe.h"
+#include "../../../util/pmu.h"
+#include "../../../util/debug.h"
+#include "../../../util/auxtrace.h"
+#include "../../../util/record.h"
+#include "../../../util/arm-spe.h"
 
 #define KiB(x) ((x) * 1024)
 #define MiB(x) ((x) * 1024 * 1024)
@@ -120,9 +120,9 @@ static int arm_spe_recording_options(struct auxtrace_record *itr,
 	 */
 	perf_evlist__to_front(evlist, arm_spe_evsel);
 
-	perf_evsel__set_sample_bit(arm_spe_evsel, CPU);
-	perf_evsel__set_sample_bit(arm_spe_evsel, TIME);
-	perf_evsel__set_sample_bit(arm_spe_evsel, TID);
+	evsel__set_sample_bit(arm_spe_evsel, CPU);
+	evsel__set_sample_bit(arm_spe_evsel, TIME);
+	evsel__set_sample_bit(arm_spe_evsel, TID);
 
 	/* Add dummy event to keep tracking */
 	err = parse_events(evlist, "dummy:u", NULL);
@@ -134,9 +134,9 @@ static int arm_spe_recording_options(struct auxtrace_record *itr,
 
 	tracking_evsel->core.attr.freq = 0;
 	tracking_evsel->core.attr.sample_period = 1;
-	perf_evsel__set_sample_bit(tracking_evsel, TIME);
-	perf_evsel__set_sample_bit(tracking_evsel, CPU);
-	perf_evsel__reset_sample_bit(tracking_evsel, BRANCH_STACK);
+	evsel__set_sample_bit(tracking_evsel, TIME);
+	evsel__set_sample_bit(tracking_evsel, CPU);
+	evsel__reset_sample_bit(tracking_evsel, BRANCH_STACK);
 
 	return 0;
 }

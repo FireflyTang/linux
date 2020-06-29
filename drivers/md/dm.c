@@ -25,6 +25,8 @@
 #include <linux/wait.h>
 #include <linux/pr.h>
 #include <linux/refcount.h>
+#include <linux/part_stat.h>
+#include <linux/blk-crypto.h>
 
 #define DM_MSG_PREFIX "core"
 
@@ -674,16 +676,21 @@ static bool md_in_flight(struct mapped_device *md)
 		return md_in_flight_bios(md);
 }
 
+u64 dm_start_time_ns_from_clone(struct bio *bio)
+{
+	struct dm_target_io *tio = container_of(bio, struct dm_target_io, clone);
+	struct dm_io *io = tio->io;
+
+	return jiffies_to_nsecs(io->start_time);
+}
+EXPORT_SYMBOL_GPL(dm_start_time_ns_from_clone);
+
 static void start_io_acct(struct dm_io *io)
 {
 	struct mapped_device *md = io->md;
 	struct bio *bio = io->orig_bio;
 
-	io->start_time = jiffies;
-
-	generic_start_io_acct(md->queue, bio_op(bio), bio_sectors(bio),
-			      &dm_disk(md)->part0);
-
+	io->start_time = bio_start_io_acct(bio);
 	if (unlikely(dm_stats_used(&md->stats)))
 		dm_stats_account_io(&md->stats, bio_data_dir(bio),
 				    bio->bi_iter.bi_sector, bio_sectors(bio),
@@ -696,8 +703,7 @@ static void end_io_acct(struct dm_io *io)
 	struct bio *bio = io->orig_bio;
 	unsigned long duration = jiffies - io->start_time;
 
-	generic_end_io_acct(md->queue, bio_op(bio), &dm_disk(md)->part0,
-			    io->start_time);
+	bio_end_io_acct(bio, io->start_time);
 
 	if (unlikely(dm_stats_used(&md->stats)))
 		dm_stats_account_io(&md->stats, bio_data_dir(bio),
@@ -1003,6 +1009,7 @@ static void clone_endio(struct bio *bio)
 	struct dm_io *io = tio->io;
 	struct mapped_device *md = tio->io->md;
 	dm_endio_fn endio = tio->ti->type->end_io;
+	struct bio *orig_bio = io->orig_bio;
 
 	if (unlikely(error == BLK_STS_TARGET) && md->type != DM_TYPE_NVME_BIO_BASED) {
 		if (bio_op(bio) == REQ_OP_DISCARD &&
@@ -1014,6 +1021,18 @@ static void clone_endio(struct bio *bio)
 		else if (bio_op(bio) == REQ_OP_WRITE_ZEROES &&
 			 !bio->bi_disk->queue->limits.max_write_zeroes_sectors)
 			disable_write_zeroes(md);
+	}
+
+	/*
+	 * For zone-append bios get offset in zone of the written
+	 * sector and add that to the original bio sector pos.
+	 */
+	if (bio_op(orig_bio) == REQ_OP_ZONE_APPEND) {
+		sector_t written_sector = bio->bi_iter.bi_sector;
+		struct request_queue *q = orig_bio->bi_disk->queue;
+		u64 mask = (u64)blk_queue_zone_sectors(q) - 1;
+
+		orig_bio->bi_iter.bi_sector += written_sector & mask;
 	}
 
 	if (endio) {
@@ -1198,6 +1217,35 @@ static size_t dm_dax_copy_to_iter(struct dax_device *dax_dev, pgoff_t pgoff,
 	return ret;
 }
 
+static int dm_dax_zero_page_range(struct dax_device *dax_dev, pgoff_t pgoff,
+				  size_t nr_pages)
+{
+	struct mapped_device *md = dax_get_private(dax_dev);
+	sector_t sector = pgoff * PAGE_SECTORS;
+	struct dm_target *ti;
+	int ret = -EIO;
+	int srcu_idx;
+
+	ti = dm_dax_get_live_target(md, sector, &srcu_idx);
+
+	if (!ti)
+		goto out;
+	if (WARN_ON(!ti->type->dax_zero_page_range)) {
+		/*
+		 * ->zero_page_range() is mandatory dax operation. If we are
+		 *  here, something is wrong.
+		 */
+		dm_put_live_table(md, srcu_idx);
+		goto out;
+	}
+	ret = ti->type->dax_zero_page_range(ti, pgoff, nr_pages);
+
+ out:
+	dm_put_live_table(md, srcu_idx);
+
+	return ret;
+}
+
 /*
  * A target may call dm_accept_partial_bio only from the map routine.  It is
  * allowed for all bio types except REQ_PREFLUSH, REQ_OP_ZONE_RESET,
@@ -1303,6 +1351,8 @@ static int clone_bio(struct dm_target_io *tio, struct bio *bio,
 	struct bio *clone = &tio->clone;
 
 	__bio_clone_fast(clone, bio);
+
+	bio_crypt_clone(clone, bio, GFP_NOIO);
 
 	if (bio_integrity(bio)) {
 		int r;
@@ -1739,8 +1789,9 @@ static blk_qc_t dm_process_bio(struct mapped_device *md,
 	 * won't be imposed.
 	 */
 	if (current->bio_list) {
-		blk_queue_split(md->queue, &bio);
-		if (!is_abnormal_io(bio))
+		if (is_abnormal_io(bio))
+			blk_queue_split(md->queue, &bio);
+		else
 			dm_queue_split(md, ti, &bio);
 	}
 
@@ -1756,6 +1807,18 @@ static blk_qc_t dm_make_request(struct request_queue *q, struct bio *bio)
 	blk_qc_t ret = BLK_QC_T_NONE;
 	int srcu_idx;
 	struct dm_table *map;
+
+	if (dm_get_md_type(md) == DM_TYPE_REQUEST_BASED) {
+		/*
+		 * We are called with a live reference on q_usage_counter, but
+		 * that one will be released as soon as we return.  Grab an
+		 * extra one as blk_mq_make_request expects to be able to
+		 * consume a reference (which lives until the request is freed
+		 * in case a request is allocated).
+		 */
+		percpu_ref_get(&q->q_usage_counter);
+		return blk_mq_make_request(q, bio);
+	}
 
 	map = dm_get_live_table(md, &srcu_idx);
 
@@ -1938,16 +2001,15 @@ static struct mapped_device *alloc_dev(int minor)
 	INIT_LIST_HEAD(&md->table_devices);
 	spin_lock_init(&md->uevent_lock);
 
-	md->queue = blk_alloc_queue_node(GFP_KERNEL, numa_node_id);
-	if (!md->queue)
-		goto bad;
-	md->queue->queuedata = md;
 	/*
 	 * default to bio-based required ->make_request_fn until DM
 	 * table is loaded and md->type established. If request-based
 	 * table is loaded: blk-mq will override accordingly.
 	 */
-	blk_queue_make_request(md->queue, dm_make_request);
+	md->queue = blk_alloc_queue(dm_make_request, numa_node_id);
+	if (!md->queue)
+		goto bad;
+	md->queue->queuedata = md;
 
 	md->disk = alloc_disk_node(1, md->numa_node_id);
 	if (!md->disk)
@@ -1968,7 +2030,7 @@ static struct mapped_device *alloc_dev(int minor)
 	if (IS_ENABLED(CONFIG_DAX_DRIVER)) {
 		md->dax_dev = alloc_dax(md, md->disk->disk_name,
 					&dm_dax_ops, 0);
-		if (!md->dax_dev)
+		if (IS_ERR(md->dax_dev))
 			goto bad;
 	}
 
@@ -2570,7 +2632,7 @@ static int __dm_suspend(struct mapped_device *md, struct dm_table *map,
 	if (noflush)
 		set_bit(DMF_NOFLUSH_SUSPENDING, &md->flags);
 	else
-		pr_debug("%s: suspending with flush\n", dm_device_name(md));
+		DMDEBUG("%s: suspending with flush", dm_device_name(md));
 
 	/*
 	 * This gets reverted if there's an error later and the targets
@@ -3199,6 +3261,7 @@ static const struct dax_operations dm_dax_ops = {
 	.dax_supported = dm_dax_supported,
 	.copy_from_iter = dm_dax_copy_from_iter,
 	.copy_to_iter = dm_dax_copy_to_iter,
+	.zero_page_range = dm_dax_zero_page_range,
 };
 
 /*
