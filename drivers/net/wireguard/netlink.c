@@ -238,7 +238,7 @@ static int wg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 			goto out;
 
 		if (wg->bind_addr.addr.sa_family == AF_INET) {
-			if (nla_put(skb, WGDEVICE_A_BIND_ADDR, sizeof(struct sockaddr_in), &wg->bind_addr.addr4)) 
+			if (nla_put(skb, WGDEVICE_A_BIND_ADDR, sizeof(struct sockaddr_in), &wg->bind_addr.addr4))
 				goto out;
 		} else if (wg->bind_addr.addr.sa_family == AF_INET6) {
 			if (nla_put(skb, WGDEVICE_A_BIND_ADDR, sizeof(struct sockaddr_in6), &wg->bind_addr.addr6))
