@@ -70,11 +70,4 @@ struct wg_device {
 int wg_device_init(void);
 void wg_device_uninit(void);
 
-////////////////////
-char *showip4(const struct in_addr* addr);
-char *showip6(const struct in6_addr* addr);
-
-
-
-
 #endif /* _WG_DEVICE_H */

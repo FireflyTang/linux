@@ -347,8 +347,6 @@ static void set_sock_opts(struct socket *sock)
 
 int wg_socket_init(struct wg_device *wg, struct addr_struct *bind_addr, u16 port)
 {
-	pr_info("enter wg_socket_init\n");
-
 	struct net *net;
 	int ret;
 	struct udp_tunnel_sock_cfg cfg = {
@@ -385,31 +383,21 @@ int wg_socket_init(struct wg_device *wg, struct addr_struct *bind_addr, u16 port
 #if IS_ENABLED(CONFIG_IPV6)
 retry:
 #endif
+
 	if (bind_addr->addr.sa_family == AF_INET || bind_addr->addr.sa_family == AF_UNSPEC) {
-		pr_info("wg_socket_init checkpoint 1 type %d\n", bind_addr->addr.sa_family);
-		if(bind_addr->addr.sa_family == AF_INET) {
-			port4.local_ip = bind_addr->addr4.sin_addr;
-			pr_info("wg_socket_init checkpoint 1-0");
-		}
-		pr_info("wg_socket_init checkpoint 1-1 is v4 of undef, %s %d\n", showip4(&port4.local_ip), ntohs(port4.local_udp_port));
+		if(bind_addr->addr.sa_family == AF_INET) port4.local_ip = bind_addr->addr4.sin_addr;
 		ret = udp_sock_create(net, &port4, &new4);
 		if (ret < 0) {
 			pr_err("%s: Could not create IPv4 socket\n", wg->dev->name);
 			goto out;
 		}
-		pr_info("wg_socket_init checkpoint 1-2\n");
 		set_sock_opts(new4);
 		setup_udp_tunnel_sock(net, new4, &cfg);
-		pr_info("wg_socket_init checkpoint 1-3, ipv4 sock create success!!!\n");
 	}
+
 #if IS_ENABLED(CONFIG_IPV6)
 	if (ipv6_mod_enabled() && (bind_addr->addr.sa_family == AF_INET6 || bind_addr->addr.sa_family == AF_UNSPEC)) {
-		pr_info("wg_socket_init checkpoint 2 type %d\n", bind_addr->addr.sa_family);
-		if(bind_addr->addr.sa_family == AF_INET6) {
-			port6.local_ip6 = bind_addr->addr6.sin6_addr;
-			pr_info("wg_socket_init checkpoint 2-0");
-		}
-		pr_info("wg_socket_init checkpoint 2-1 is v6 or undef, %s %d \n", showip6((void*)&port6.local_ip6) , ntohs(port6.local_udp_port));
+		if(bind_addr->addr.sa_family == AF_INET6) port6.local_ip6 = bind_addr->addr6.sin6_addr;
 		ret = udp_sock_create(net, &port6, &new6);
 		if (ret < 0) {
 			if(new4) udp_tunnel_sock_release(new4);
@@ -419,15 +407,12 @@ retry:
 			       wg->dev->name);
 			goto out;
 		}
-		pr_info("wg_socket_init checkpoint 2-2\n");
 		set_sock_opts(new6);
 		setup_udp_tunnel_sock(net, new6, &cfg);
-		pr_info("wg_socket_init checkpoint 2-3, ipv6 sock create success!!!\n");
 	}
 #endif
-	pr_info("wg_socket_init checkpoint 3\n");
+
 	wg_socket_reinit(wg, new4 ? new4->sk : NULL, new6 ? new6->sk : NULL);
-	pr_info("wg_socket_init checkpoint 4\n");
 	ret = 0;
 out:
 	put_net(net);
@@ -438,7 +423,7 @@ void wg_socket_reinit(struct wg_device *wg, struct sock *new4,
 		      struct sock *new6)
 {
 	struct sock *old4, *old6;
-	pr_info("enter wg_socket_reinit\n");
+
 	mutex_lock(&wg->socket_update_lock);
 	old4 = rcu_dereference_protected(wg->sock4,
 				lockdep_is_held(&wg->socket_update_lock));
@@ -446,28 +431,16 @@ void wg_socket_reinit(struct wg_device *wg, struct sock *new4,
 				lockdep_is_held(&wg->socket_update_lock));
 	rcu_assign_pointer(wg->sock4, new4);
 	rcu_assign_pointer(wg->sock6, new6);
-	
+
 	if(new4) {
 		wg->incoming_port = ntohs(inet_sk(new4)->inet_sport);
-		wg->bind_addr.addr4.sin_addr.s_addr = inet_sk(new4)->inet_saddr; 
+		wg->bind_addr.addr4.sin_addr.s_addr = inet_sk(new4)->inet_saddr;
 		wg->bind_addr.addr.sa_family = new6 ? AF_UNSPEC : AF_INET;
 	} else if (new6) {
 		wg->incoming_port = ntohs(inet_sk(new6)->inet_sport);
 		memcpy(&wg->bind_addr.addr6.sin6_addr, &inet6_sk(new6)->saddr, sizeof(struct in6_addr));
 		wg->bind_addr.addr.sa_family = AF_INET6;
 	}
-	if(wg->sock4)
-		pr_info("wg_socket_reinit checkpoint 2 finally v4 sock %s %d\n", showip4((void *)&(inet_sk(new4)->inet_saddr)), ntohs(inet_sk(new4)->inet_sport));
-	if(wg->sock6) 
-		pr_info("wg_socket_reinit checkpoint 2 finally v6 sock %s %d\n", showip6(&(inet6_sk(new6)->saddr)), ntohs(inet_sk(new6)->inet_sport));
-
-	pr_info("wg_socket_reinit checkpoint 2 finally dev type %d\n", wg->bind_addr.addr.sa_family);
-	if(wg->bind_addr.addr.sa_family == AF_INET || wg->bind_addr.addr.sa_family == AF_UNSPEC)
-		pr_info("wg_socket_reinit checkpoint 2 finally dev v4 %s\n", showip4(&wg->bind_addr.addr4.sin_addr));
-	if(wg->bind_addr.addr.sa_family == AF_INET6 || wg->bind_addr.addr.sa_family == AF_UNSPEC)
-		pr_info("wg_socket_reinit checkpoint 2 finally dev v6 %s\n", showip6(&wg->bind_addr.addr6.sin6_addr));
-	pr_info("wg_socket_reinit checkpoint 2 finally dev port %d\n", wg->incoming_port);
-	
 	mutex_unlock(&wg->socket_update_lock);
 	synchronize_rcu();
 	sock_free(old4);

@@ -1,1 +1,1 @@
-#define WIREGUARD_VERSION "1.0.3"
+#define WIREGUARD_VERSION "1.0.0"

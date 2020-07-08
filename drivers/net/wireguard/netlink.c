@@ -218,7 +218,6 @@ static int wg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 	bool done = true;
 	void *hdr;
 
-	pr_info("enter wg_get_device_dump");
 	rtnl_lock();
 	mutex_lock(&wg->device_update_lock);
 	cb->seq = wg->device_update_gen;
@@ -497,15 +496,14 @@ out:
 static bool bind_addr_eq(const struct sockaddr *a, const struct sockaddr *b)
 {
 	return (a->sa_family == AF_INET && b->sa_family == AF_INET &&
-	 	 ((struct sockaddr_in *)a)->sin_addr.s_addr == ((struct sockaddr_in *)b)->sin_addr.s_addr) ||
-		 (a->sa_family == AF_INET6 && b->sa_family == AF_INET6 &&
-		 ipv6_addr_equal(&((struct sockaddr_in6 *)a)->sin6_addr, &((struct sockaddr_in6 *)b)->sin6_addr)) ||
-		 (a->sa_family == AF_UNSPEC && b->sa_family == AF_UNSPEC);
+		((struct sockaddr_in *)a)->sin_addr.s_addr == ((struct sockaddr_in *)b)->sin_addr.s_addr) ||
+		(a->sa_family == AF_INET6 && b->sa_family == AF_INET6 &&
+		ipv6_addr_equal(&((struct sockaddr_in6 *)a)->sin6_addr, &((struct sockaddr_in6 *)b)->sin6_addr)) ||
+		(a->sa_family == AF_UNSPEC && b->sa_family == AF_UNSPEC);
 }
 
 static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 {
-	pr_info("enter wg_set_device\n");
 	struct wg_device *wg = lookup_interface(info->attrs, skb);
 	u32 flags = 0;
 	int ret;
@@ -520,17 +518,10 @@ static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 
 	rtnl_lock();
 	mutex_lock(&wg->device_update_lock);
-	
-	pr_info("wg_set_device checkpoint 1 before set dev type %d\n", wg->bind_addr.addr.sa_family);
-	if(wg->bind_addr.addr.sa_family==AF_INET)
-		pr_info("wg_set_device checkpoint 1 before set dev v4 %s\n", showip4(&wg->bind_addr.addr4.sin_addr));
-	else
-		pr_info("wg_set_device checkpoint 1 before set dev v6 %s\n", showip6(&wg->bind_addr.addr6.sin6_addr));
-	pr_info("wg_set_device checkpoint 1 before set dev port %d\n", wg->incoming_port);
-	
+
 	port_new = wg->incoming_port;
 	bind_addr_new = wg->bind_addr;
-	
+
 	if (info->attrs[WGDEVICE_A_FLAGS])
 		flags = nla_get_u32(info->attrs[WGDEVICE_A_FLAGS]);
 	ret = -EOPNOTSUPP;
@@ -556,13 +547,11 @@ static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 		list_for_each_entry(peer, &wg->peer_list, peer_list)
 			wg_socket_clear_peer_endpoint_src(peer);
 	}
-	
-	pr_info("wg_set_device checkpoint 2-2-1 if_running %d\n", netif_running(wg->dev));
+
 	if (info->attrs[WGDEVICE_A_LISTEN_PORT]) {
 		u16 port = nla_get_u16(info->attrs[WGDEVICE_A_LISTEN_PORT]);
-		pr_info("wg_set_device checkpoint 2-3 port diff %d \n",port);
 		if (wg->incoming_port != port) {
-			if (!netif_running(wg->dev)) 
+			if (!netif_running(wg->dev))
 				wg->incoming_port = port;
 			else{
 				if_set_socket = true;
@@ -572,20 +561,14 @@ static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	if (info->attrs[WGDEVICE_A_BIND_ADDR]) {
-		pr_info("wg_set_device checkpoint 3\n",nla_get_u16(info->attrs[WGDEVICE_A_BIND_ADDR]));
 		struct sockaddr *addr = nla_data(info->attrs[WGDEVICE_A_BIND_ADDR]);
 		if (!bind_addr_eq(&wg->bind_addr.addr, addr)) {
-			pr_info("wg_set_device checkpoint 3-3-2 addr diff");
 			size_t len = nla_len(info->attrs[WGDEVICE_A_BIND_ADDR]);
-			pr_info("wg_set_device checkpoint 3-3-3");
 			if ((addr->sa_family == AF_INET && len == sizeof(struct sockaddr_in)) ||
 				((addr->sa_family == AF_INET6 || addr->sa_family == AF_UNSPEC) && len == sizeof(struct sockaddr_in6))) {
-					pr_info("wg_set_device checkpoint 3-3-4 addr type, %d",addr->sa_family);
 					if (!netif_running(wg->dev)){
-						pr_info("wg_set_device checkpoint 3-4 dealy set addr\n");
-						memcpy(&wg->bind_addr.addr, addr, len); 
+						memcpy(&wg->bind_addr.addr, addr, len);
 					} else {
-						pr_info("wg_set_device checkpoint 3-5 addr if_set_socket=true");
 						if_set_socket=true;
 						memcpy(&bind_addr_new, addr, len);
 					}
@@ -596,13 +579,11 @@ static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	if (if_set_socket) {
-		pr_info("wg_set_device checkpoint 4\n");
-		pr_info("wg_set_device bind_addr if v4: %d %s\n", bind_addr_new.addr.sa_family, showip4(&bind_addr_new.addr4.sin_addr));
 		ret = set_socket(wg, &bind_addr_new, port_new);
 		if (ret)
 			goto out;
 	}
-	
+
 	if (flags & WGDEVICE_F_REPLACE_PEERS)
 		wg_peer_remove_all(wg);
 
@@ -696,7 +677,6 @@ static struct genl_family genl_family __ro_after_init = {
 
 int __init wg_genetlink_init(void)
 {
-	pr_info("enter wg_genetlink_init\n");
 	return genl_register_family(&genl_family);
 }
 
